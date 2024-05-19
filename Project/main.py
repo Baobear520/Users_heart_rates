@@ -37,13 +37,14 @@ fake = Faker()
 def populate_tables():
     """
     Populate the users and heart_rates tables with sample data.
-    - 50 users
-    - 25000 heart rate records (approximately 500 records per user)
+    - 10 users
+    - 223200 heart rate records 
+    (approximately 720 records per user per day within 31 days)
     """
     with engine.connect() as connection:
         # Insert 50 users
         users = []
-        for _ in range(50):
+        for i in range(10):
             user = {
                 'name': fake.name(),
                 'gender': random.choice(['M', 'F']),
@@ -57,18 +58,20 @@ def populate_tables():
         user_ids = connection.execute(query_ids).fetchall()
         user_ids = [row[0] for row in user_ids]
 
-        # Insert 25000 heart rate records
+        # Insert 223000 heart rate records
         heart_rates = []
-        start_date = datetime.now() - timedelta(days=365)  # Last 365 days
+        start_date = datetime.now() - timedelta(days=31)  # Last 365 days
         for user_id in user_ids:
-            for _ in range(500):  # 500 records per user
+            for _ in range(22320):
+                current_timestamp = start_date + timedelta(seconds=30 * i)  # Increment by 30 seconds
                 heart_rate_record = {
                     'user_id': user_id,
-                    'timestamp': start_date + timedelta(days=random.randint(0, 364), seconds=random.randint(0, 86400)),  # Random time in last 365 days
+                    'timestamp': current_timestamp,  # Take a record every 30 sec
                     'heart_rate': round(random.uniform(50, 100), 1)  # Random heart rate between 50 and 100 rounded to 1 decimal
                 }
                 heart_rates.append(heart_rate_record)
-
+                start_date = heart_rate_record['timestamp']
+                
         connection.execute(insert(heart_rates_table), heart_rates)
         connection.commit()
 
