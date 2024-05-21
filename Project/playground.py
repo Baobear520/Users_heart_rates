@@ -5,7 +5,12 @@ import random
 from faker import Faker
 
 # Setup the SQLite engine
-engine = create_engine("sqlite+pysqlite:///:memory:", echo=True)
+engine = create_engine(
+    "sqlite+pysqlite:///:memory:", 
+    echo=True,
+    pool_size=10, 
+    max_overflow=20
+)
 metadata = MetaData()
 
 # Define users table

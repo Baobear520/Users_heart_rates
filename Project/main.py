@@ -1,11 +1,12 @@
 from datetime import datetime, timedelta
-from sqlalchemy import and_, create_engine, desc, insert, select, func
+from psycopg2 import OperationalError
+from sqlalchemy import FLOAT, Numeric, and_, cast, create_engine, desc, insert, select, type_coerce, values,func
 from sqlalchemy import MetaData, Table, Column, Integer, String, Float, DateTime, ForeignKey
 import random
 from faker import Faker
 
-# Setup the SQLite engine
-engine = create_engine('postgresql://username:password@host:port/database_name')
+# Setup the PostgreSQL engine
+engine = create_engine('postgresql+psycopg2://aldmikon@localhost:5432/template1')
 metadata = MetaData()
 
 # Define users table
@@ -34,24 +35,24 @@ def create_tables():
 # Initialize Faker
 fake = Faker()
 
-def populate_tables():
+def populate_tables(num_of_users,num_of_hr_records):
     """
     Populate the users and heart_rates tables with sample data.
     - 10 users
-    - 223200 heart rate records 
-    (approximately 720 records per user per day within 31 days)
+    - 892 800 heart rate records 
+    (2880 records per user per day within 31 days)
     """
     with engine.connect() as connection:
         # Insert 50 users
         users = []
-        for i in range(10):
+        for i in range(num_of_users):
             user = {
                 'name': fake.name(),
                 'gender': random.choice(['M', 'F']),
                 'age': random.randint(35, 50)
             }
             users.append(user)
-        connection.execute(insert(users_table), users)
+        connection.execute(insert(users_table).values(users))
 
         # Fetch the inserted user ids
         query_ids = select(users_table.c.id)
@@ -62,7 +63,7 @@ def populate_tables():
         heart_rates = []
         start_date = datetime.now() - timedelta(days=31)  # Last 365 days
         for user_id in user_ids:
-            for _ in range(22320):
+            for i in range(num_of_hr_records): #number of records per user
                 current_timestamp = start_date + timedelta(seconds=30 * i)  # Increment by 30 seconds
                 heart_rate_record = {
                     'user_id': user_id,
@@ -70,10 +71,18 @@ def populate_tables():
                     'heart_rate': round(random.uniform(50, 100), 1)  # Random heart rate between 50 and 100 rounded to 1 decimal
                 }
                 heart_rates.append(heart_rate_record)
-                start_date = heart_rate_record['timestamp']
                 
-        connection.execute(insert(heart_rates_table), heart_rates)
+        connection.execute(insert(heart_rates_table).values(heart_rates))
         connection.commit()
+
+def is_database_empty():
+    """
+    Check if the database is empty by querying one of the tables.
+    """
+    with engine.connect() as connection:
+        result = connection.execute(select(func.count(users_table.c.id)))
+        count = result.scalar()
+        return count == 0
 
 def query_users(min_age, gender, min_avg_heart_rate, date_from, date_to):
     """
@@ -81,38 +90,45 @@ def query_users(min_age, gender, min_avg_heart_rate, date_from, date_to):
     имеют средний пульс выше, чем 'min_avg_heart_rate', на определенном промежутке времени
     """
 
-    # Subquery for average heart rates
-    avg_heart_rates = select(
-        heart_rates_table.c.user_id,
-        func.avg(heart_rates_table.c.heart_rate).label('avg_hr')
-    ).where(
-        and_(
-            heart_rates_table.c.timestamp > date_from,
-            heart_rates_table.c.timestamp < date_to
-        )
-    ).group_by(
-        heart_rates_table.c.user_id
-    ).having(
-        func.avg(heart_rates_table.c.heart_rate) > min_avg_heart_rate
-    ).alias('avg_heart_rates')
-    
-    # Main query
-    main_query = select(
-        users_table.c.id,
-        users_table.c.name,
-        avg_heart_rates.c.avg_hr
-    ).join(
-        avg_heart_rates,
-        users_table.c.id == avg_heart_rates.c.user_id
-    ).where(
-        and_(
-            users_table.c.age > min_age,
-            users_table.c.gender == gender
-        )
-    )
-
     with engine.connect() as connection:
-        result = connection.execute(main_query)
+        # Filter users by age and gender first
+        filtered_users = select(users_table.c.id).where(
+            and_(
+                users_table.c.age > min_age,
+                users_table.c.gender == gender
+            )
+        ).alias('filtered_users')
+        
+        # Subquery to calculate average heart rate for filtered users
+        subquery = (
+            select(
+                heart_rates_table.c.user_id,
+                cast(func.round(cast(func.avg(heart_rates_table.c.heart_rate), Numeric), 2), Float).label('avg_heart_rate')
+            )
+            .where(
+                and_(
+                    heart_rates_table.c.timestamp >= date_from,
+                    heart_rates_table.c.timestamp <= date_to,
+                    heart_rates_table.c.user_id.in_(select(filtered_users.c.id))
+                )
+            )
+            .group_by(heart_rates_table.c.user_id)
+            .having(func.avg(heart_rates_table.c.heart_rate) > min_avg_heart_rate)
+            .alias('avg_heart_rates')
+        )
+
+        # Main query to get user details
+        query = (
+            select(
+                users_table.c.id,
+                users_table.c.name,
+                users_table.c.age,
+                subquery.c.avg_heart_rate
+                )
+            .select_from(users_table.join(subquery, users_table.c.id == subquery.c.user_id))
+        )
+
+        result = connection.execute(query)
         return result.fetchall()
     
 def query_for_user(user_id, date_from, date_to):
@@ -121,38 +137,44 @@ def query_for_user(user_id, date_from, date_to):
     за часовые промежутки в указанном периоде 'date_from' и 'date_to'
     """
     
-    # Subquery to create hourly intervals using PostgreSQL's date_trunc function
-    hourly_interval = func.date_trunc('hour', heart_rates_table.c.timestamp).label('hour')
-    
-    # Query to get top 10 highest average heart rates over hourly intervals
-    query = select(
-        heart_rates_table.c.user_id,
-        hourly_interval,
-        func.avg(heart_rates_table.c.heart_rate).label('avg_hr')
-    ).where(
-        and_(
-            heart_rates_table.c.user_id == user_id,
-            heart_rates_table.c.timestamp > date_from,
-            heart_rates_table.c.timestamp < date_to
-        )
-    ).group_by(
-        heart_rates_table.c.user_id,
-        hourly_interval
-    ).order_by(
-        desc(func.avg(heart_rates_table.c.heart_rate))
-    ).limit(10)
-
     with engine.connect() as connection:
+        subquery = (
+            select(
+                heart_rates_table.c.user_id.label('user_id'),
+                func.date_trunc('hour', heart_rates_table.c.timestamp).label('hour'),
+                cast(func.round(cast(func.avg(heart_rates_table.c.heart_rate), Numeric), 2), Float).label('avg_heart_rate')
+            )
+            .where(
+                and_(
+                    heart_rates_table.c.user_id == user_id,
+                    heart_rates_table.c.timestamp >= date_from,
+                    heart_rates_table.c.timestamp <= date_to
+                )
+            )
+            .group_by(heart_rates_table.c.user_id, func.date_trunc('hour', heart_rates_table.c.timestamp))
+            .alias('hourly_avg_heart_rates')
+        )
+
+        query = (
+            select(
+                subquery.c.user_id,
+                subquery.c.avg_heart_rate)
+            .order_by(subquery.c.avg_heart_rate.desc())
+            .limit(10)
+        )
         result = connection.execute(query)
         return result.fetchall()
 
 
 if __name__ == "__main__":
-    #if not db:
-        # create_tables()
-        # populate_tables()
-
     #Parameters
+    #DB seeding parameters
+    users = 10
+    days_of_monitoring = 31
+    hr_records_per_hour = 60 * 2
+    hr_records = users * days_of_monitoring * 24 * hr_records_per_hour
+    
+    #Query parameters
     date_from = datetime(2023, 1, 1)
     date_to = datetime(2024, 5, 18)
     min_avg_heart_rate = 70.0
@@ -160,15 +182,30 @@ if __name__ == "__main__":
     gender = 'M'
     user_id = 1
 
-    # Execute query_users with the provided parameters
+    # Check if the tables exist and if they are empty
+    try:
+        with engine.connect() as connection:
+            # Try a simple query to check if the database is accessible
+            connection.execute(select(1))
+    except OperationalError:
+        # If the connection fails, the database does not exist
+        create_tables()
+        populate_tables(num_of_users=users,num_of_hr_records=hr_records)
+    
+    # If the database is accessible, check if the tables are empty
+    if is_database_empty():
+        populate_tables(num_of_users=users,num_of_hr_records=hr_records)
+
+
+    #Execute query_users with the provided parameters
     query_users_results = query_users(min_age, gender, min_avg_heart_rate, date_from, date_to)
     print("\nQuery Results:")
     for row in query_users_results:
         print(row)
 
-    query_for_user_results = query_for_user(user_id, date_from, date_to)
-    print("\nQuery Results:")
-    for row in query_for_user_results:
-        print(row)
+    # query_for_user_results = query_for_user(user_id, date_from, date_to)
+    # print("\nQuery Results:")
+    # for row in query_for_user_results:
+    #     print(row)
 
     
