@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta
-from psycopg2 import OperationalError
-from sqlalchemy import FLOAT, Numeric, and_, cast, create_engine, desc, insert, select, type_coerce, values,func
-from sqlalchemy import MetaData, Table, Column, Integer, String, Float, DateTime, ForeignKey
 import random
 from faker import Faker
+from psycopg2 import OperationalError
+from sqlalchemy import Index, Numeric, and_, cast, create_engine,insert, select, values,func
+from sqlalchemy import MetaData, Table, Column, Integer, String, Float, DateTime, ForeignKey
+
 
 # Setup the PostgreSQL engine
 engine = create_engine('postgresql+psycopg2://aldmikon@localhost:5432/template1')
@@ -14,7 +15,7 @@ users_table = Table(
     'users',
     metadata,
     Column('id', Integer, primary_key=True),
-    Column('name', String(32)),
+    Column('name', String(16)),
     Column('gender', String(1)),
     Column('age', Integer)
 )
@@ -26,8 +27,18 @@ heart_rates_table = Table(
     Column('id', Integer, primary_key=True),
     Column('user_id', Integer, ForeignKey('users.id'), index=True),
     Column('timestamp', DateTime),
-    Column('heart_rate', Float(1)),
+    Column('heart_rate', Float),
 )
+
+# Creating indexes to speed up the existing queries
+
+# Assuming frequent writes into the 'heart_rates' table, existing index on user_id 
+# and the fact that the records for each user most likely will be added chronologically
+# no extra indexes added on the table columns
+
+# Create a multi-column index on id, age, and gender in the users table
+Index('ix_users_id_age_gender', users_table.c.id, users_table.c.age, users_table.c.gender)
+
 
 def create_tables():
     metadata.create_all(engine)
@@ -95,7 +106,7 @@ def query_users(min_age, gender, min_avg_heart_rate, date_from, date_to):
         filtered_users = select(users_table.c.id).where(
             and_(
                 users_table.c.age > min_age,
-                users_table.c.gender == gender
+                users_table.c.gender == gender.upper()
             )
         ).alias('filtered_users')
         
@@ -119,12 +130,7 @@ def query_users(min_age, gender, min_avg_heart_rate, date_from, date_to):
 
         # Main query to get user details
         query = (
-            select(
-                users_table.c.id,
-                users_table.c.name,
-                users_table.c.age,
-                subquery.c.avg_heart_rate
-                )
+            select(users_table.c.name)
             .select_from(users_table.join(subquery, users_table.c.id == subquery.c.user_id))
         )
 
@@ -143,7 +149,7 @@ def query_for_user(user_id, date_from, date_to):
                 heart_rates_table.c.user_id.label('user_id'),
                 func.date_trunc('hour', heart_rates_table.c.timestamp).label('hour'),
                 cast(func.round(cast(func.avg(heart_rates_table.c.heart_rate), Numeric), 2), Float).label('avg_heart_rate')
-            )
+            )# rounding up the result of avg, casting it to a Decimal class object and then to a float
             .where(
                 and_(
                     heart_rates_table.c.user_id == user_id,
@@ -156,9 +162,7 @@ def query_for_user(user_id, date_from, date_to):
         )
 
         query = (
-            select(
-                subquery.c.user_id,
-                subquery.c.avg_heart_rate)
+            select(subquery.c.avg_heart_rate)
             .order_by(subquery.c.avg_heart_rate.desc())
             .limit(10)
         )
@@ -177,9 +181,9 @@ if __name__ == "__main__":
     #Query parameters
     date_from = datetime(2023, 1, 1)
     date_to = datetime(2024, 5, 18)
-    min_avg_heart_rate = 70.0
+    min_avg_heart_rate = 70
     min_age = 40
-    gender = 'M'
+    gender = 'm'
     user_id = 1
 
     # Check if the tables exist and if they are empty
